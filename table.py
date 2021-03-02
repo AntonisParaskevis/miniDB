@@ -58,12 +58,14 @@ class Table:
             self.data = [] # data is a list of lists, a list of rows that is.
 
             # if primary key is set, keep its index as an attribute
-            if primary_key is not None:
-                self.pk_idx = self.column_names.index(primary_key)
-            else:
+            if primary_key is None:
                 self.pk_idx = None
-
-
+            elif (isinstance(primary_key, str)): #single column pr_key
+                self.pk_idx = self.column_names.index(primary_key)
+            else:  # multicolumn primary key
+                self.pk_idx = []
+                for clmn in primary_key:
+                    (self.pk_idx).append(self.column_names.index(clmn))
             self._update()
 
     # if any of the name, columns_names and column types are none. return an empty table object
@@ -97,7 +99,6 @@ class Table:
         '''
         if len(row)!=self._no_of_columns:
             raise ValueError(f'ERROR -> Cannot insert {len(row)} values. Only {self._no_of_columns} columns exist')
-
         for i in range(len(row)):
             # for each value, cast and replace it in row.
             try:
@@ -106,9 +107,22 @@ class Table:
             except:
                 raise ValueError(f'ERROR -> Value {row[i]} is not of type {self.column_types[i]}.')
 
-            # if value is to be appended to the primary_key column, check that it doesnt alrady exist (no duplicate primary keys)
-            if i==self.pk_idx and row[i] in self.columns[self.pk_idx]:
-                raise ValueError(f'## ERROR -> Value {row[i]} already exists in primary key column.')
+            # if value is to be appended to the primary_key column, check that it doesnt already exist (no duplicate primary keys)
+            # single column primary_key
+            if isinstance(self.pk_idx,int):
+                if i == self.pk_idx and row[i] in self.columns[i]:
+                    raise ValueError(f'## ERROR -> Value {row[i]} already exists in primary key column.')
+        # multicolumn primary_key
+        if isinstance(self.pk_idx,list):
+            tempList = [row[col] for col in self.pk_idx]
+            for testRow in self.data:
+                isFound = True # indicates if duplicate row is found
+                for el in tempList:
+                    if el not in testRow:
+                        isFound = False
+                        break
+                if isFound:
+                    raise ValueError(f'## ERROR -> Values {tempList} already exist in primary key columns.')
 
         # if insert_stack is not empty, append to its last index
         if insert_stack != []:
@@ -126,15 +140,17 @@ class Table:
 
         # get the condition and the set column
         column = self.columns[self.column_names.index(column_name)]
-        set_column_idx = self.column_names.index(set_column)
+        if isinstance(set_column, str):
+            set_column_idx = self.column_names.index(set_column)
+            # set_columns_indx = [self.column_names.index(set_column_name) for set_column_name in set_column_names]
 
-        # set_columns_indx = [self.column_names.index(set_column_name) for set_column_name in set_column_names]
-
-        # for each value in column, if condition, replace it with set_value
+            # check if user tries to set same values for p_k column
+            if set_column_idx == self.pk_idx and set_value in self.columns[set_column_idx]:
+                raise ValueError(f'## ERROR -> Column {set_column} is primary key and can not have same values.')
+            # for each value in column, if condition, replace it with set_value
         for row_ind, column_value in enumerate(column):
             if get_op(operator, column_value, value):
                 self.data[row_ind][set_column_idx] = set_value
-
         self._update()
                 # print(f"Updated {len(indexes_to_del)} rows")
 
@@ -209,6 +225,7 @@ class Table:
             return Table(load=dict)
         else:
             return Table(load=dict).order_by(order_by, asc)
+
 
 
     def _select_where_with_btree(self, return_columns, bt, condition, order_by=None, asc=False, top_k=None):
@@ -343,12 +360,23 @@ class Table:
         headers = [f'{col} ({tp.__name__})' for col, tp in zip(self.column_names, self.column_types)]
         if self.pk_idx is not None:
             # table has a primary key, add PK next to the appropriate column
-            headers[self.pk_idx] = headers[self.pk_idx]+' #PK#'
+            #if primary_key is a single column
+            try:
+                if isinstance(self.pk_idx,int): 
+                    headers[self.pk_idx] = headers[self.pk_idx]+' #PK#'
+                else:
+                    for clmn in self.pk_idx:
+                        headers[clmn] = headers[clmn]+' #PK#'
+            except:
+                pass
         # detect the rows that are no tfull of nones (these rows have been deleted)
         # if we dont skip these rows, the returning table has empty rows at the deleted positions
         non_none_rows = [row for row in self.data if any(row)]
         # print using tabulate
-        print(tabulate(non_none_rows[:no_of_rows], headers=headers)+'\n')
+        if no_of_rows != None:
+            print(tabulate(non_none_rows[:no_of_rows], headers=headers)+'\n')
+        else:
+            print(tabulate(self.data, headers=headers)+'\n')    
 
 
     def _parse_condition(self, condition, join=False):
@@ -377,3 +405,176 @@ class Table:
         f.close()
 
         self.__dict__.update(tmp_dict)
+        
+        # WARNING
+        # here starts my code
+       
+    def _select_where_groupby(self, return_columns, aggr_function, where_condition=None, having_condition=None, order_by=None, asc=False, top_k=None):
+        '''
+        Select and return a table containing specified columns and rows grouped-by (a specific column) where condition is met
+        '''
+        
+        if(isinstance(return_columns, str)):
+            raise Exception(f'Return columns must be inserted as a list') 
+        indx = self.column_names.index(return_columns[-1])
+        typeList = self.column_types
+        # if attemps to perform aggregate function (other than count) to non numeric values, raise exception
+        if (not(typeList[indx]==int or typeList[indx]==float) and not(aggr_function=='count')):
+            raise Exception(f'Can not perform '+aggr_function+' to non numeric values')
+        if (return_columns == '*'):
+            raise Exception(f'Return columns should be explicitly written and the aggregate function will affect the last column')
+        elif isinstance(return_columns, str):
+            raise Exception(f'Return columns should be of type list. (the second parameter is return_columns not condition)')
+        else:
+            return_cols = [self.column_names.index(colname) for colname in return_columns]
+            # if where_condition is None, return all rows
+            # if not, return the rows with values where condition is met for value
+        if where_condition is not None:
+            column_name, operator, value = self._parse_condition(where_condition)
+            column = self.columns[self.column_names.index(column_name)]
+            rows = [ind for ind, x in enumerate(column) if get_op(operator, x, value)]
+        else:
+            rows = [i for i in range(len(self.columns[0]))] 
+        # copy the old dict, but only the rows and columns of data with index in rows/columns (the indexes that we want to be returned)
+        dict = {(key):([[self.data[i][j] for j in return_cols] for i in rows] if key=="data" else value) for key,value in self.__dict__.items()}
+        dataList = dict.get('data')
+        dictData = {}
+        tempList = []
+        if (aggr_function=='sum'):
+            for row in dataList:
+                key = tuple(row[:-1])    
+                if (dictData.get(key,'None')=='None'):
+                    dictData[key] = row[-1]
+                else:
+                    temp = dictData.get(key)
+                    temp += row[-1]
+                    dictData[key] = temp
+            for k, v in dictData.items():
+                tempRow = list(k)
+                tempRow.append(v)
+                tempList.append(tempRow)
+            dict['data'] = tempList
+        elif (aggr_function=='avg'):
+            for row in dataList:
+                key = tuple(row[:-1])
+                if (dictData.get(key, 'None')=='None'):
+                    dictData[key] = [row[-1],1]
+                else:
+                    tempRow = dictData.get(key)
+                    tempRow[0] = tempRow[0] + row[-1]
+                    tempRow[1] = tempRow[1] + 1
+                    dictData[key] = tempRow
+            for k, v in dictData.items():
+                tempRow = list(k)
+                val = v[0]/v[1]
+                tempRow.append(val)
+                tempList.append(tempRow)
+            dict['data'] = tempList
+        elif (aggr_function=='count'):
+            for row in dataList:
+                key = tuple(row[:-1])
+                if (dictData.get(key, 'None')=='None'):
+                    dictData[key] = 1
+                else:
+                    tempVal = dictData.get(key)
+                    tempVal += 1
+                    dictData[key] = tempVal
+            for k, v in dictData.items():
+                tempRow = list(k)
+                tempRow.append(v)
+                tempList.append(tempRow)
+            dict['data'] = tempList
+        elif (aggr_function=='max'):
+            for row in dataList:
+                key = tuple(row[:-1])
+                if (dictData.get(key, 'None')=='None'):
+                    dictData[key] = row[-1]
+                else:
+                    tempVal = dictData.get(key)
+                    if (row[-1]>tempVal):
+                        tempVal = row[-1]
+                    dictData[key] = tempVal
+            for k, v in dictData.items():
+                tempRow = list(k)
+                tempRow.append(v)
+                tempList.append(tempRow)
+            dict['data'] = tempList
+        elif (aggr_function=='min'):
+            for row in dataList:
+                key = tuple(row[:-1])
+                if (dictData.get(key, 'None')=='None'):
+                    dictData[key] = row[-1]
+                else:
+                    tempVal = dictData.get(key)
+                    if (row[-1]<tempVal):
+                        tempVal = row[-1]
+                    dictData[key] = tempVal
+            for k, v in dictData.items():
+                tempRow = list(k)
+                tempRow.append(v)
+                tempList.append(tempRow)
+            dict['data'] = tempList
+        if having_condition is not None:
+            column_name, operator, value = self._parse_condition(having_condition)
+            tempList = dict.get('data')
+            colList = dict.get('column_names')
+            for i in range (len(colList)):
+                if colList[i] == column_name:
+                    index = return_cols.index(i)
+                    break
+            tempList = [row for row in tempList if get_op(operator, row[index], value)]
+            dict['data'] = tempList    
+        # we need to set the new column names/types and no of columns, since we might
+        # only return some columns
+        dict['column_names'] = [self.column_names[i] for i in return_cols]
+        dict['column_types']   = [self.column_types[i] for i in return_cols]
+        dict['_no_of_columns'] = len(return_cols)
+        # order by the return table if specified
+        if order_by is None:
+            return Table(load=dict)
+        else:
+            return Table(load=dict).order_by(order_by, asc)
+
+
+    def _select_distinct_where(self, return_columns, condition=None, order_by=None, asc=False, top_k=None):
+        '''
+        Select and return a table containing specified columns and rows where condition is met
+        '''
+        # if * return all columns, else find the column indexes for the columns specified
+        if return_columns == '*':
+            return_cols = [i for i in range(len(self.column_names))]
+        elif isinstance(return_columns, str):
+            raise Exception(f'Return columns should be "*" or of list type.')
+        else:
+            return_cols = [self.column_names.index(colname) for colname in return_columns]
+
+        # if condition is None, return all rows
+        # if not, return the rows with values where condition is met for value
+
+        if condition is not None:
+            column_name, operator, value = self._parse_condition(condition)
+            column = self.columns[self.column_names.index(column_name)]
+            rows = [ind for ind, x in enumerate(column) if get_op(operator, x, value)]
+        else:
+            rows = [i for i in range(len(self.columns[0]))]
+
+        # top k rows
+        rows = rows[:top_k]
+        # copy the old dict, but only the rows and columns of data with index in rows/columns (the indexes that we want returned)
+        dict = {(key):([[self.data[i][j] for j in return_cols] for i in rows] if key=="data" else value) for key,value in self.__dict__.items()} 
+        tempList = []
+        for i in dict.get('data'):
+            if i not in tempList:
+                tempList.append(i)
+        dict['data']= tempList
+        # we need to set the new column names/types and no of columns, since we might
+        # only return some columns
+        dict['column_names'] = [self.column_names[i] for i in return_cols]
+        dict['column_types']   = [self.column_types[i] for i in return_cols]
+        dict['_no_of_columns'] = len(return_cols)
+
+        # order by the return table if specified
+        if order_by is None:
+            return Table(load=dict)
+        else:
+            return Table(load=dict).order_by(order_by, asc)
